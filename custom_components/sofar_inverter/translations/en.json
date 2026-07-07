@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Sofar Inverter",
+        "description": "Enter the Modbus TCP connection details for your Sofar inverter. Control features require the inverter to be set to Passive Mode.",
+        "data": {
+          "name": "Name",
+          "host": "IP Address",
+          "port": "Modbus TCP Port",
+          "slave": "Slave / Unit ID",
+          "model": "Inverter Model",
+          "scan_interval": "Polling Interval (seconds)",
+          "enable_control": "Enable battery control (Passive Mode required)",
+          "max_power": "Maximum charge/discharge power (W)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the inverter. Check the IP address and port.",
+      "invalid_slave": "Connected, but could not read from the inverter. Check the Slave/Unit ID and model.",
+      "unknown": "Unexpected error. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "An inverter with this IP, port and Slave ID is already configured."
+    }
+  }
+}
