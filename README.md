@@ -3,6 +3,8 @@
 [![Validate](https://github.com/LucMathlin/ha-sofar-inverter/actions/workflows/validate.yml/badge.svg)](https://github.com/LucMathlin/ha-sofar-inverter/actions/workflows/validate.yml)
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
+[![Add to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=LucMathlin&repository=ha-sofar-inverter&category=integration)
+
 A Home Assistant custom integration for Sofar Solar inverters via Modbus TCP.
 
 ## Supported Devices
