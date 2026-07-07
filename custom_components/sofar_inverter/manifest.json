@@ -5,9 +5,9 @@
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/LucMathlin/ha-sofar-inverter",
-  "issue_tracker": "https://github.com/LucMathlin/ha-sofar-inverter/issues",
-  "iot_class": "local_polling",
   "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/LucMathlin/ha-sofar-inverter/issues",
   "requirements": ["pymodbus>=3.11.2"],
   "version": "0.1.0"
 }
