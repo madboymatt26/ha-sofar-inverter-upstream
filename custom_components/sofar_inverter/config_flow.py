@@ -1,4 +1,4 @@
-"""Config flow for the Sofar Inverter Modbus TCP integration."""
+"""Config and options flow for the Sofar Inverter Modbus TCP integration."""
 from __future__ import annotations
 
 import logging
@@ -8,7 +8,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant
+from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -22,12 +22,16 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ENABLE_CLOCK_MONITOR,
     CONF_ENABLE_CONTROL,
+    CONF_ENABLE_SCHEDULE,
     CONF_MAX_POWER,
     CONF_MODEL,
     CONF_NAME,
     CONF_SCAN_INTERVAL,
     CONF_SLAVE,
+    DEFAULT_ENABLE_CLOCK_MONITOR,
+    DEFAULT_ENABLE_SCHEDULE,
     DEFAULT_MAX_POWER,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
@@ -38,6 +42,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+CURRENT_VERSION = 2
 
 
 def _user_schema() -> vol.Schema:
@@ -64,6 +70,52 @@ def _user_schema() -> vol.Schema:
             vol.Optional(CONF_MAX_POWER, default=DEFAULT_MAX_POWER): NumberSelector(
                 NumberSelectorConfig(min=100, max=20000, step=100, mode=NumberSelectorMode.BOX)
             ),
+            vol.Optional(
+                CONF_ENABLE_SCHEDULE, default=DEFAULT_ENABLE_SCHEDULE
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_ENABLE_CLOCK_MONITOR, default=DEFAULT_ENABLE_CLOCK_MONITOR
+            ): BooleanSelector(),
+        }
+    )
+
+
+def _options_schema(entry: config_entries.ConfigEntry) -> vol.Schema:
+    """Options form, pre-filled with the values the entry is currently using.
+
+    The connection details and model are deliberately absent: changing them would
+    change the entry's identity, and the entry should be re-added instead.
+    """
+
+    def current(key: str, default):
+        if key in entry.options:
+            return entry.options[key]
+        return entry.data.get(key, default)
+
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_SCAN_INTERVAL,
+                default=current(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            ): NumberSelector(
+                NumberSelectorConfig(min=2, max=300, step=1, mode=NumberSelectorMode.BOX)
+            ),
+            vol.Optional(
+                CONF_ENABLE_CONTROL, default=current(CONF_ENABLE_CONTROL, False)
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_MAX_POWER, default=current(CONF_MAX_POWER, DEFAULT_MAX_POWER)
+            ): NumberSelector(
+                NumberSelectorConfig(min=100, max=20000, step=100, mode=NumberSelectorMode.BOX)
+            ),
+            vol.Optional(
+                CONF_ENABLE_SCHEDULE,
+                default=current(CONF_ENABLE_SCHEDULE, DEFAULT_ENABLE_SCHEDULE),
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_ENABLE_CLOCK_MONITOR,
+                default=current(CONF_ENABLE_CLOCK_MONITOR, DEFAULT_ENABLE_CLOCK_MONITOR),
+            ): BooleanSelector(),
         }
     )
 
@@ -97,7 +149,7 @@ async def _test_connection(host: str, port: int, slave: int, model: str) -> str 
 class SofarInverterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the config flow for Sofar Inverter."""
 
-    VERSION = 1
+    VERSION = CURRENT_VERSION
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Single-step setup: connection + model + control options."""
@@ -128,6 +180,10 @@ class SofarInverterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                         CONF_ENABLE_CONTROL: bool(user_input[CONF_ENABLE_CONTROL]),
                         CONF_MAX_POWER: int(user_input[CONF_MAX_POWER]),
+                        CONF_ENABLE_SCHEDULE: bool(user_input[CONF_ENABLE_SCHEDULE]),
+                        CONF_ENABLE_CLOCK_MONITOR: bool(
+                            user_input[CONF_ENABLE_CLOCK_MONITOR]
+                        ),
                     },
                 )
 
@@ -135,4 +191,34 @@ class SofarInverterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=_user_schema(),
             errors=errors,
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        entry: config_entries.ConfigEntry,
+    ) -> SofarInverterOptionsFlow:
+        """Return the options flow handler."""
+        return SofarInverterOptionsFlow()
+
+
+class SofarInverterOptionsFlow(config_entries.OptionsFlow):
+    """Let the tunables be changed without re-adding the integration."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        """Show and store the options form."""
+        if user_input is not None:
+            return self.async_create_entry(
+                data={
+                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    CONF_ENABLE_CONTROL: bool(user_input[CONF_ENABLE_CONTROL]),
+                    CONF_MAX_POWER: int(user_input[CONF_MAX_POWER]),
+                    CONF_ENABLE_SCHEDULE: bool(user_input[CONF_ENABLE_SCHEDULE]),
+                    CONF_ENABLE_CLOCK_MONITOR: bool(user_input[CONF_ENABLE_CLOCK_MONITOR]),
+                }
+            )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_options_schema(self.config_entry),
         )

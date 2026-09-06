@@ -12,7 +12,9 @@
           "model": "Inverter Model",
           "scan_interval": "Polling Interval (seconds)",
           "enable_control": "Enable battery control (Passive Mode required)",
-          "max_power": "Maximum charge/discharge power (W)"
+          "max_power": "Maximum charge/discharge power (W)",
+          "enable_schedule": "Enable Timing / Time-of-Use schedule entities (ME3000SP and HYD-ES only)",
+          "enable_clock_monitor": "Monitor the inverter clock (recommended when using schedules)"
         }
       }
     },
@@ -23,6 +25,21 @@
     },
     "abort": {
       "already_configured": "An inverter with this IP, port and Slave ID is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sofar Inverter options",
+        "description": "Change polling and feature settings. Connection details and inverter model cannot be changed here \u2014 remove and re-add the integration if those need to change.",
+        "data": {
+          "scan_interval": "Polling Interval (seconds)",
+          "enable_control": "Enable battery control (Passive Mode required)",
+          "max_power": "Maximum charge/discharge power (W)",
+          "enable_schedule": "Enable Timing / Time-of-Use schedule entities (ME3000SP and HYD-ES only)",
+          "enable_clock_monitor": "Monitor the inverter clock (recommended when using schedules)"
+        }
+      }
     }
   }
 }

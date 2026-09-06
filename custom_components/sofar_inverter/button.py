@@ -1,25 +1,22 @@
-"""Button platform for Sofar Inverter quick control actions."""
+"""Button platform for Sofar Inverter quick control actions.
+
+The two original mode buttons keep their unique_ids (``btn_auto`` /
+``btn_standby``) and names. A clock-sync button is added when clock monitoring is
+available.
+"""
 from __future__ import annotations
 
 import logging
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import (
-    CONF_MODEL,
-    CONF_NAME,
-    CONF_SLAVE,
-    DOMAIN,
-    MODE_AUTO,
-    MODE_STANDBY,
-    MODEL_LABELS,
-)
+from .const import DOMAIN, MODE_AUTO, MODE_STANDBY
 from .coordinator import SofarCoordinator
+from .device import build_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,32 +28,26 @@ async def async_setup_entry(
 ) -> None:
     """Set up Sofar control buttons."""
     coordinator: SofarCoordinator = hass.data[DOMAIN][entry.entry_id]
-    inverter_name: str = entry.data[CONF_NAME]
-    host: str = entry.data[CONF_HOST]
-    port: int = entry.data[CONF_PORT]
-    slave: int = entry.data.get(CONF_SLAVE, 1)
-    model: str = entry.data[CONF_MODEL]
+    device_info = build_device_info(entry, coordinator)
 
-    device_info = DeviceInfo(
-        identifiers={(DOMAIN, f"{host}_{port}_{slave}")},
-        name=inverter_name,
-        manufacturer="Sofar Solar",
-        model=MODEL_LABELS.get(model, model),
-        configuration_url=f"http://{host}",
-    )
+    entities: list[ButtonEntity] = []
 
-    async_add_entities(
-        [
+    if coordinator.enable_control:
+        entities += [
             SofarModeButton(
-                coordinator, entry.entry_id, inverter_name, device_info,
+                coordinator, entry.entry_id, device_info,
                 "Set Auto Mode", MODE_AUTO, "auto", "mdi:autorenew",
             ),
             SofarModeButton(
-                coordinator, entry.entry_id, inverter_name, device_info,
+                coordinator, entry.entry_id, device_info,
                 "Set Standby", MODE_STANDBY, "standby", "mdi:power-standby",
             ),
         ]
-    )
+
+    if coordinator.supports_clock:
+        entities.append(SofarSyncClockButton(coordinator, entry.entry_id, device_info))
+
+    async_add_entities(entities)
 
 
 class SofarModeButton(ButtonEntity):
@@ -68,8 +59,7 @@ class SofarModeButton(ButtonEntity):
         self,
         coordinator: SofarCoordinator,
         entry_id: str,
-        inverter_name: str,
-        device_info: DeviceInfo,
+        device_info,
         label: str,
         mode: str,
         key: str,
@@ -86,4 +76,35 @@ class SofarModeButton(ButtonEntity):
         """Apply the configured mode."""
         success = await self._coordinator.async_set_mode(self._mode)
         if not success:
-            _LOGGER.error("Failed to apply Sofar mode '%s'", self._mode)
+            _LOGGER.error(
+                "Failed to apply Sofar mode '%s': %s",
+                self._mode, self._coordinator.last_command_result,
+            )
+
+
+class SofarSyncClockButton(ButtonEntity):
+    """Broadcast Home Assistant's clock to the inverter.
+
+    The protocol only defines clock setting as a broadcast to address 0x88, so
+    this updates every Sofar inverter on the same RS485 bus, not only this one.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:clock-check"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        coordinator: SofarCoordinator,
+        entry_id: str,
+        device_info,
+    ) -> None:
+        self._coordinator = coordinator
+        self._attr_name = "Sync Inverter Clock"
+        self._attr_unique_id = f"{entry_id}_btn_sync_clock"
+        self._attr_device_info = device_info
+
+    async def async_press(self) -> None:
+        """Send the broadcast time-set frame."""
+        if not await self._coordinator.async_sync_clock():
+            _LOGGER.error("Failed to sync the inverter clock")
