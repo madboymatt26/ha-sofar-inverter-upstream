@@ -76,9 +76,8 @@ async def test_user_flow_cannot_connect(hass: HomeAssistant, gateway: FakeSofarG
     assert result["errors"] == {"base": "cannot_connect"}
 
 
-@pytest.mark.parametrize("expected_lingering_tasks", [True])  # see the xfail below
 async def test_wrong_unit_id_with_silent_gateway_is_unknown(
-    hass: HomeAssistant, gateway: FakeSofarGateway, no_setup, expected_lingering_tasks
+    hass: HomeAssistant, gateway: FakeSofarGateway, no_setup
 ) -> None:
     """A wrong unit ID behind a gateway that stays silent surfaces as "unknown".
 
@@ -90,15 +89,10 @@ async def test_wrong_unit_id_with_silent_gateway_is_unknown(
     assert len(gateway.frames) == 4  # first try + 3 retries
 
 
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _test_connection only closes its client on the success path; after "
-    "an exception the connection and a pymodbus reconnect task are left running",
-)
 async def test_connection_test_closes_its_client_on_error(
-    hass: HomeAssistant, gateway: FakeSofarGateway, no_setup, fast_modbus_client, expected_lingering_tasks
+    hass: HomeAssistant, gateway: FakeSofarGateway, no_setup, fast_modbus_client
 ) -> None:
+    """No lingering reconnect task either: the harness fails the test if one is left."""
     closed: list[bool] = []
     original = fast_modbus_client.close
 
