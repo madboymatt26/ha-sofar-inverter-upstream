@@ -1724,7 +1724,10 @@ class SofarCoordinator(DataUpdateCoordinator):
                 )
                 self._record_command(CommandResult(False, f"Connection failed: {exc}"))
                 return False
-            result = await self._dispatch(client, mode, self.active_power, grid_power=None)
+            # Battery Save chooses Auto or Standby from grid power; use the last
+            # polled value rather than None, which always meant Auto.
+            grid_power = self.data.get("grid_power") if self.data else None
+            result = await self._dispatch(client, mode, self.active_power, grid_power)
         self._record_command(result)
         # Refresh so entities reflect the new state quickly.
         await self.async_request_refresh()

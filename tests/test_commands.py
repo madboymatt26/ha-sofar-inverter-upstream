@@ -134,9 +134,9 @@ async def test_battery_save(
     await control.async_refresh()
     gateway.clear()
     await _select(hass, "Battery Save")
-    # The select dispatches with grid_power=None, which always means Auto; the
-    # refresh that follows then applies the grid-power rule.
-    assert gateway.passive_commands() == [(0x0103, 0x5555), (expected_cmd, 0x5555)]
+    # The select uses the last polled grid power, and the refresh that follows
+    # re-applies the same choice.
+    assert gateway.passive_commands() == [(expected_cmd, 0x5555)] * 2
     assert control.effective_mode == ("auto" if expected_cmd == 0x0103 else "standby")
 
 
