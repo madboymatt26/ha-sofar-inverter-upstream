@@ -257,6 +257,29 @@ class SofarHeartbeatRequest(ModbusPDU):
         return 0
 
 
+class SofarHeartbeatResponse(ModbusPDU):
+    """Decoder for a reply to the FC 0x49 heartbeat, if the inverter sends one.
+
+    The heartbeat is fire-and-forget, but without a registered decoder an
+    answered heartbeat could not be decoded: pymodbus then raises inside
+    data_received() and asyncio tears down the shared connection. The reply's
+    content is not used, so any payload is accepted and kept only for logging.
+    """
+
+    function_code = SOFAR_FN_HEARTBEAT
+    rtu_frame_size = 8  # id + fc + 4 data + 2 crc, mirroring the request
+
+    def __init__(self, slave=1, transaction=0):
+        super().__init__(dev_id=slave, transaction_id=transaction)
+        self.raw = b""
+
+    def encode(self) -> bytes:
+        return self.raw
+
+    def decode(self, data: bytes) -> None:
+        self.raw = bytes(data)
+
+
 class SofarReadTimeRequest(ModbusPDU):
     """Read the inverter RTC (protocol doc 2.11): FC 0x10, address 0x8000.
 
@@ -572,7 +595,12 @@ class _GatewayConnection:
         "read time", but pymodbus needs its standard Write Multiple Registers
         decoder for schedule writes and HYD-EP/KTL passive control.
         """
-        for pdu in (SofarPassiveModeResponse, SofarExtReadResponse, SofarEventLogResponse):
+        for pdu in (
+            SofarPassiveModeResponse,
+            SofarHeartbeatResponse,
+            SofarExtReadResponse,
+            SofarEventLogResponse,
+        ):
             try:
                 client.register(pdu)
             except Exception as exc:  # noqa: BLE001

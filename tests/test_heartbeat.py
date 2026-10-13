@@ -175,6 +175,13 @@ class LoopErrors:
         self._loop.set_exception_handler(self._previous)
 
 
+async def _unload_all_entries(hass: HomeAssistant) -> None:
+    for entry in hass.config_entries.async_entries("sofar_inverter"):
+        await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    await asyncio.sleep(0.02)
+
+
 async def _run_with_answered_heartbeats(hass, gateway, sleeps) -> list[dict]:
     gateway.heartbeat_reply = "echo"
     with LoopErrors() as errors:
@@ -220,27 +227,27 @@ async def test_silent_register_range_does_not_starve_heartbeat(
     assert live_gap < WATCHDOG_SECONDS
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG/RISK: if the inverter answers FC 0x49, pymodbus cannot decode the "
-    "reply and data_received() raises, tearing down the shared connection",
-)
 async def test_answered_heartbeat_keeps_the_connection(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder
 ) -> None:
+    """If the inverter answers 0x49, the reply is decoded and ignored."""
     errors = await _run_with_answered_heartbeats(hass, gateway, sleeps)
     assert len(gateway.frames_for(FC_HEARTBEAT)) >= 4
     assert errors == []
-    assert gateway.connections <= 2  # shared client + one clock-read connection
+    # Same as without replies: shared client, the clock read's own connection
+    # (which closes the shared one), then the shared client again.
+    assert gateway.connections <= 3
 
 
-async def test_answered_heartbeat_reconnects_every_beat(
+async def test_polls_work_between_answered_heartbeats(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder
 ) -> None:
-    """Pins today's behaviour behind the xfail above."""
-    errors = await _run_with_answered_heartbeats(hass, gateway, sleeps)
-    beats = len(gateway.frames_for(FC_HEARTBEAT))
-    assert beats >= 4
-    assert len(errors) >= beats - 1
-    assert "data_received() call failed" in errors[0]["message"]
-    assert gateway.connections >= beats
+    gateway.heartbeat_reply = "echo"
+    with LoopErrors() as errors:
+        _, coordinator = await setup_entry(hass, gateway)
+        for _ in range(4):
+            await sleeps.wait_for(len(sleeps.delays) + 2)
+            await coordinator.async_refresh()
+            assert coordinator.last_update_success is True
+        await _unload_all_entries(hass)
+    assert errors == []
