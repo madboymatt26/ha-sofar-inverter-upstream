@@ -45,7 +45,8 @@ async def test_failsafe_given_up_when_working_mode_unreadable(
     for _ in range(3):
         await coordinator.async_refresh()
     gateway.silent_ranges = []
-    await coordinator.async_refresh()
+    for _ in range(4):  # the block may still be in its silence back-off
+        await coordinator.async_refresh()
     assert coordinator.data["working_mode"] == 3
     assert gateway.passive_commands() == []
 

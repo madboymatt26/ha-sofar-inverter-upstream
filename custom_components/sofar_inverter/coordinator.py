@@ -122,6 +122,11 @@ HEARTBEAT_MAX_FAST_RETRIES = 3
 # this many polls (about 5 minutes at the default 10 s interval).
 BLOCK_RETRY_POLLS = 30
 
+# A block that gets no reply at all while other blocks answer is skipped for
+# 1, 2, 4 ... polls, up to this many, so one silent range costs one timed-out
+# transaction now and then instead of one per register on every poll.
+BLOCK_SILENT_MAX_SKIP = 32
+
 # Standard Modbus exception codes, for readable logging of a 0x8x response.
 MODBUS_EXCEPTIONS = {
     1: "Illegal function",
@@ -490,6 +495,10 @@ class ReadBlock:
     failures: int = 0
     individual: bool = False
     polls_since_fallback: int = 0
+    # Consecutive polls in which the block got no reply at all, and how many
+    # more polls to skip it for (exponential back-off, see BLOCK_SILENT_MAX_SKIP).
+    silent_polls: int = 0
+    skip_polls: int = 0
 
     @property
     def count(self) -> int:
@@ -871,6 +880,8 @@ class SofarCoordinator(DataUpdateCoordinator):
 
         self._battery2_checked = False
         self._battery2_attempts = 0
+        # Set by _read_registers: the last failed read got no reply at all.
+        self._no_response = False
 
         # Device identification, filled in best-effort on first poll.
         self.product_code: str | None = None
@@ -1037,7 +1048,14 @@ class SofarCoordinator(DataUpdateCoordinator):
     async def _read_registers(
         self, client, func: int, address: int, count: int, what: str
     ) -> list[int] | None:
-        """Read registers with one function code. None on any failure."""
+        """Read registers with one function code. None on any failure.
+
+        Sets ``self._no_response`` when nothing came back (timeout after
+        pymodbus's retries, or no connection), as opposed to an exception reply
+        or a short one. Only an answered failure is worth retrying with the
+        other function code or register by register.
+        """
+        self._no_response = False
         try:
             if func == FN_READ_INPUT:
                 response = await client.read_input_registers(
@@ -1049,9 +1067,11 @@ class SofarCoordinator(DataUpdateCoordinator):
                 )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("%s: read 0x%04X+%s failed: %s", what, address, count, exc)
+            self._no_response = True
             return None
 
         if response is None:
+            self._no_response = True
             return None
         if hasattr(response, "isError") and response.isError():
             self._log_modbus_error(f"{what} (0x{address:04X}+{count})", response)
@@ -1062,26 +1082,34 @@ class SofarCoordinator(DataUpdateCoordinator):
         return list(registers)
 
     # ------------------------------------------------------------------ poll
+    async def _connected_client(self):
+        """The shared client, connected. Must be called holding self._lock."""
+        try:
+            return await self._gateway.async_get_client()
+        except Exception as exc:  # noqa: BLE001
+            raise UpdateFailed(f"Cannot connect to {self.host}:{self.port}: {exc}") from exc
+
     async def _async_update_data(self) -> dict[str, object]:
         self._gateway.ensure_heartbeat()
-        async with self._lock:
-            try:
-                client = await self._gateway.async_get_client()
-            except Exception as exc:  # noqa: BLE001
-                raise UpdateFailed(
-                    f"Cannot connect to {self.host}:{self.port}: {exc}"
-                ) from exc
-            try:
+        # Each step takes the gateway lock on its own, so the heartbeat and
+        # commands can reach the bus between steps and between register blocks
+        # instead of waiting out a whole poll. Holding it for the entire poll let
+        # one unanswered register range keep the heartbeat off the bus for
+        # minutes, past the inverter's 60 s passive-mode watchdog.
+        try:
+            async with self._lock:
+                client = await self._connected_client()
                 if not self._device_info_done:
                     await self._read_device_info(client)
-
                 if self.model == MODEL_HYD_EP_KTL and not self._battery2_checked:
                     await self._maybe_add_battery2(client)
 
-                results = await self._read_all(client)
-                if not results:
-                    raise UpdateFailed("No registers could be read from the inverter")
+            results = await self._read_all()
+            if not results:
+                raise UpdateFailed("No registers could be read from the inverter")
 
+            async with self._lock:
+                client = await self._connected_client()
                 await self._maybe_read_event_log(client)
 
                 self._derive(results)
@@ -1090,77 +1118,37 @@ class SofarCoordinator(DataUpdateCoordinator):
                 # run before honouring the (restart-default) "No Override".
                 await self._maybe_failsafe(client, results)
 
-                # Re-apply / evaluate the active control mode on the same shared
-                # connection (we already hold the gateway lock here).
+                # Re-apply / evaluate the active control mode.
                 await self._apply_active_mode(client, results)
 
-                # Last, because reading the clock needs a dedicated connection
-                # and therefore drops the shared client for the rest of the cycle.
+            # Last, because reading the clock needs a dedicated connection and
+            # therefore drops the shared client for the rest of the cycle.
+            async with self._lock:
                 await self._maybe_read_clock()
 
-                self._add_status_values(results)
-                return results
-            except UpdateFailed:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                raise UpdateFailed(f"Error polling {self.host}:{self.port}: {exc}") from exc
+            self._add_status_values(results)
+            return results
+        except UpdateFailed:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise UpdateFailed(f"Error polling {self.host}:{self.port}: {exc}") from exc
 
-    async def _read_all(self, client) -> dict[str, object]:
-        """Read every configured register, batched into as few requests as possible."""
+    async def _read_all(self) -> dict[str, object]:
+        """Read every configured register, batched into as few requests as possible.
+
+        The gateway lock is taken per block. If nothing answers before any
+        register has been read this poll, the inverter is not responding and the
+        poll fails at once rather than timing out block after block.
+        """
         results: dict[str, object] = {}
 
         for block in self._blocks:
-            if block.individual:
-                block.polls_since_fallback += 1
-                if block.polls_since_fallback < BLOCK_RETRY_POLLS:
-                    await self._read_block_individually(client, block, results)
-                    continue
-                # Periodically try the whole block again, so one bad spell
-                # does not cost a transaction per register for good.
-                block.polls_since_fallback = 0
-
-            registers = None
-            for func in block.func_order():
-                registers = await self._read_registers(
-                    client, func, block.start, block.count, "Block read"
-                )
-                if registers is not None:
-                    block.func = func
-                    break
-
-            if registers is None:
-                if not block.individual:
-                    # Do not lose a whole block to one transient failure.
-                    block.func = None
-                read = await self._read_block_individually(client, block, results)
-                # Only a block the inverter refuses while its registers still
-                # read one by one counts against it. If nothing reads at all the
-                # bus or gateway is down, which says nothing about the block.
-                if read and not block.individual:
-                    block.failures += 1
-                    if block.failures >= 3:
-                        block.individual = True
-                        block.polls_since_fallback = 0
-                        _LOGGER.info(
-                            "Register block 0x%04X+%s keeps failing on %s; falling "
-                            "back to individual reads for its %s register(s)",
-                            block.start, block.count, self.host, len(block.sensors),
-                        )
+            if block.skip_polls > 0:
+                block.skip_polls -= 1
                 continue
-
-            if block.individual:
-                _LOGGER.info(
-                    "Register block 0x%04X+%s on %s reads as a block again",
-                    block.start, block.count, self.host,
-                )
-                block.individual = False
-            block.failures = 0
-            for sensor in block.sensors:
-                offset = sensor.register - block.start
-                chunk = registers[offset : offset + sensor.count]
-                if len(chunk) < sensor.count:
-                    continue
-                self._store_value(results, sensor, chunk)
+            async with self._lock:
+                client = await self._connected_client()
+                await self._read_block(client, block, results)
 
         # Values written but not yet visible in a re-read keep their staged value
         # so the UI does not flicker back to the old setting.
@@ -1168,6 +1156,87 @@ class SofarCoordinator(DataUpdateCoordinator):
             results.setdefault(key, value)
 
         return results
+
+    async def _read_block(self, client, block: ReadBlock, results: dict) -> None:
+        """Read one block, falling back to per-register reads when refused."""
+        if block.individual:
+            block.polls_since_fallback += 1
+            if block.polls_since_fallback < BLOCK_RETRY_POLLS:
+                read = await self._read_block_individually(client, block, results)
+                if not read and self._no_response:
+                    self._note_silent_block(block, results)
+                return
+            # Periodically try the whole block again, so one bad spell does not
+            # cost a transaction per register for good.
+            block.polls_since_fallback = 0
+
+        registers = None
+        for func in block.func_order():
+            registers = await self._read_registers(
+                client, func, block.start, block.count, "Block read"
+            )
+            if registers is not None:
+                block.func = func
+                break
+            if self._no_response:
+                break  # silence: another function code will not help
+
+        if registers is None:
+            if self._no_response:
+                self._note_silent_block(block, results)
+                return
+            if not block.individual:
+                # Do not lose a whole block to one transient refusal.
+                block.func = None
+            read = await self._read_block_individually(client, block, results)
+            if not read and self._no_response:
+                self._note_silent_block(block, results)
+                return
+            # Only a block the inverter refuses while its registers still read
+            # one by one counts against it; silence part-way through does not.
+            if read and not block.individual and not self._no_response:
+                block.failures += 1
+                if block.failures >= 3:
+                    block.individual = True
+                    block.polls_since_fallback = 0
+                    _LOGGER.info(
+                        "Register block 0x%04X+%s keeps failing on %s; falling "
+                        "back to individual reads for its %s register(s)",
+                        block.start, block.count, self.host, len(block.sensors),
+                    )
+            if read:
+                block.silent_polls = 0
+            return
+
+        if block.individual:
+            _LOGGER.info(
+                "Register block 0x%04X+%s on %s reads as a block again",
+                block.start, block.count, self.host,
+            )
+            block.individual = False
+        block.failures = 0
+        block.silent_polls = 0
+        for sensor in block.sensors:
+            offset = sensor.register - block.start
+            chunk = registers[offset : offset + sensor.count]
+            if len(chunk) < sensor.count:
+                continue
+            self._store_value(results, sensor, chunk)
+
+    def _note_silent_block(self, block: ReadBlock, results: dict) -> None:
+        """React to a block that got no reply at all."""
+        if not results:
+            # Nothing has answered this poll: the inverter (or the RS485 side of
+            # the gateway) is silent. Fail now instead of timing out every block.
+            raise UpdateFailed(
+                f"No response from unit {self.slave} at {self.host}:{self.port}"
+            )
+        block.silent_polls += 1
+        block.skip_polls = min(2 ** (block.silent_polls - 1), BLOCK_SILENT_MAX_SKIP)
+        _LOGGER.debug(
+            "Register block 0x%04X+%s got no reply from %s; skipping it for %s poll(s)",
+            block.start, block.count, self.host, block.skip_polls,
+        )
 
     async def _read_block_individually(self, client, block, results: dict) -> int:
         """Per-register fallback so one bad address cannot blank a whole block.
@@ -1183,9 +1252,11 @@ class SofarCoordinator(DataUpdateCoordinator):
                 registers = await self._read_registers(
                     client, func, sensor.register, sensor.count, f"Read {sensor.key}"
                 )
-                if registers is not None:
+                if registers is not None or self._no_response:
                     break
             if registers is None:
+                if self._no_response:
+                    break  # nothing is answering; do not time out every register
                 continue
             read += 1
             self._store_value(results, sensor, registers)
@@ -1257,10 +1328,10 @@ class SofarCoordinator(DataUpdateCoordinator):
             registers = await self._read_registers(
                 client, func, REG_DEVICE_INFO, 16, "Device info"
             )
-            if registers is not None:
+            if registers is not None or self._no_response:
                 break
 
-        if registers is None:
+        if registers is None and not self._no_response:
             # Fall back to the extended function code the protocol table assigns
             # to this range.
             try:

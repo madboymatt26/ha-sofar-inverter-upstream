@@ -193,27 +193,23 @@ async def _run_with_answered_heartbeats(hass, gateway, sleeps) -> list[dict]:
     return errors
 
 
-# ------------------------------------------------------------ known problems
+# ------------------------------------------------------------ slow or silent bus
 def _measure_gap(gateway: FakeSofarGateway) -> float:
     beats = [f.at for f in gateway.frames_for(FC_HEARTBEAT)]
     return max(b - a for a, b in zip(beats, beats[1:]))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a poll holds the gateway lock through every timeout and retry, so a "
-    "register range the inverter does not answer starves the heartbeat past 60 s",
-)
 async def test_silent_register_range_does_not_starve_heartbeat(
     hass: HomeAssistant, gateway: FakeSofarGateway
 ) -> None:
-    """One unanswered range (here the 0x10B0 battery parameters) costs
-    2 function codes x 4 attempts per block plus 2 x 4 per register on fallback.
-    Each attempt waits the full 5 s timeout while holding the lock."""
+    """One unanswered range (here the 0x10B0 battery parameters) costs one
+    transaction, after which the lock is released and the heartbeat goes out."""
     gateway.silent_ranges = [range(0x10B0, 0x10BD)]
     interval = HEARTBEAT_INTERVAL / SCALE
     with patch.object(coordinator_module, "HEARTBEAT_INTERVAL", interval):
         _, coordinator = await setup_entry(hass, gateway)
+        for block in coordinator._blocks:
+            block.skip_polls = 0  # make this poll hit the silent range again
         gateway.clear()
         await asyncio.sleep(interval * 3)
         await coordinator.async_refresh()
@@ -224,6 +220,7 @@ async def test_silent_register_range_does_not_starve_heartbeat(
         "%s unanswered requests in one poll; longest heartbeat gap ~%.0f s live",
         len(unanswered), live_gap,
     )
+    assert len(unanswered) == 4  # one transaction: first try + 3 retries
     assert live_gap < WATCHDOG_SECONDS
 
 

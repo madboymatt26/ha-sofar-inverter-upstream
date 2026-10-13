@@ -89,17 +89,15 @@ async def test_faults_make_entities_unavailable(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: with a silent RS485 side each poll waits out every timeout and "
-    "retry under the gateway lock (~3 min live) before entities go unavailable",
-)
 async def test_silent_inverter_detected_within_a_minute(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
     _, coordinator = await setup_entry(hass, gateway)
     gateway.silent = True
+    gateway.clear()
     elapsed = await _timed_refresh(coordinator)
     assert coordinator.last_update_success is False
     assert elapsed * SCALE < 60
+    # One block read, first try + 3 retries: about 20 s live.
+    assert len(_poll_requests(gateway)) == 4
 
 
 async def test_recovery_after_silence(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
@@ -157,8 +155,8 @@ async def test_refused_block_falls_back_then_is_retried(
     assert len(_poll_requests(gateway)) == 4
 
 
-async def test_commands_wait_for_a_slow_poll(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    """A Battery Mode change cannot reach the bus while a poll holds the lock."""
+async def test_commands_do_not_wait_for_a_slow_poll(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
+    """A Battery Mode change reaches the bus between blocks of a slow poll."""
     import asyncio
 
     _, coordinator = await setup_entry(hass, gateway, enable_control=True)
@@ -174,8 +172,21 @@ async def test_commands_wait_for_a_slow_poll(hass: HomeAssistant, gateway: FakeS
     assert gateway.passive_state == "standby"
     first_command = next(i for i, f in enumerate(gateway.frames) if f.fc == 0x42)
     timeouts = [f for f in gateway.frames[:first_command] if not f.answered and f.fc != FC_HEARTBEAT]
-    _LOGGER.warning(
-        "Standby command queued behind %s timed-out requests (~%.0f s live)",
-        len(timeouts), len(timeouts) * REAL_TIMEOUT,
-    )
-    assert len(timeouts) * REAL_TIMEOUT > 60
+    # At most one block's transaction (first try + 3 retries) ahead of it.
+    assert len(timeouts) * REAL_TIMEOUT <= 20
+
+
+async def test_silent_range_is_skipped_with_backoff(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
+    """A range that never answers costs one transaction now and then, not every poll."""
+    gateway.silent_ranges = [range(0x10B0, 0x10BD)]
+    _, coordinator = await setup_entry(hass, gateway)
+    gateway.clear()
+    for _ in range(20):
+        await coordinator.async_refresh()
+        assert coordinator.last_update_success is True
+        assert hass.states.get(SOC).state == "60.0"
+    tries = [f for f in gateway.frames if f.fc in (0x03, 0x04) and f.data[:2] == b"\x10\xb0"]
+    # Tried on polls 2, 5, 10 and 19 of these 20 (back-off 1, 2, 4, 8), four
+    # attempts each, instead of every poll.
+    assert len(tries) <= 4 * 4
+    assert hass.states.get("sensor.sofar_inverter_battery_soc").state == "60.0"
