@@ -68,7 +68,7 @@ def test_design_margin_against_the_60s_watchdog() -> None:
 
 
 async def test_heartbeat_frame(hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder) -> None:
-    await setup_entry(hass, gateway)
+    await setup_entry(hass, gateway, enable_control=True)
     await sleeps.wait_for(3)
     beats = gateway.frames_for(FC_HEARTBEAT)
     assert beats, "no heartbeat sent"
@@ -79,7 +79,7 @@ async def test_heartbeat_frame(hass: HomeAssistant, gateway: FakeSofarGateway, s
 
 async def test_heartbeat_cadence(hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder) -> None:
     # Measured from the first beat on the wire, so set-up is not part of it.
-    await setup_entry(hass, gateway)
+    await setup_entry(hass, gateway, enable_control=True)
     deadline = time.monotonic() + 5
     while not gateway.frames_for(FC_HEARTBEAT):  # first beat on the wire
         assert time.monotonic() < deadline
@@ -91,21 +91,23 @@ async def test_heartbeat_cadence(hass: HomeAssistant, gateway: FakeSofarGateway,
     assert len(gateway.frames_for(FC_HEARTBEAT)) >= 5
 
 
-async def test_heartbeat_is_sent_even_with_control_disabled(
+async def test_no_heartbeat_with_control_disabled(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder
 ) -> None:
-    """There is no option that stops the heartbeat on an ME3000 entry, so the
-    planned read-only first step is not free of non-read frames."""
+    """With control off the integration has no setpoint to keep alive, and the
+    read-only first hardware step must not send anything but reads."""
     _, coordinator = await setup_entry(hass, gateway, enable_control=False)
-    assert coordinator.enable_control is False
-    await sleeps.wait_for(3)
-    assert gateway.frames_for(FC_HEARTBEAT)
+    for _ in range(3):
+        await coordinator.async_refresh()
+    await asyncio.sleep(0.05)  # ~50 recorded intervals if a loop were running
+    assert sleeps.delays == []
+    assert gateway.frames_for(FC_HEARTBEAT) == []
 
 
 async def test_fast_retry_then_recovery(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder, caplog
 ) -> None:
-    _, coordinator = await setup_entry(hass, gateway)
+    _, coordinator = await setup_entry(hass, gateway, enable_control=True)
     await sleeps.wait_for(2)
     port = gateway.port
     await gateway.stop()  # connection refused from now on
@@ -129,7 +131,7 @@ async def test_fast_retry_then_recovery(
 async def test_no_heartbeat_after_unload(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder
 ) -> None:
-    entry, _ = await setup_entry(hass, gateway)
+    entry, _ = await setup_entry(hass, gateway, enable_control=True)
     await sleeps.wait_for(2)
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -143,12 +145,12 @@ async def test_one_heartbeat_per_slave_on_a_shared_gateway(
     hass: HomeAssistant, gateway: FakeSofarGateway, sleeps: SleepRecorder
 ) -> None:
     gateway.slave = 1
-    await setup_entry(hass, gateway)
+    await setup_entry(hass, gateway, enable_control=True)
     # A second inverter on the same RS485 bus (unit 2). The fake only answers
     # unit 1, so the second entry is set up with its first poll patched.
     from .conftest import make_entry
 
-    entry2 = make_entry(gateway, slave=2, name="Sofar 2")
+    entry2 = make_entry(gateway, slave=2, name="Sofar 2", enable_control=True)
     entry2.add_to_hass(hass)
     with patch.object(coordinator_module.SofarCoordinator, "_async_update_data", return_value={}):
         assert await hass.config_entries.async_setup(entry2.entry_id)
@@ -185,7 +187,7 @@ async def _unload_all_entries(hass: HomeAssistant) -> None:
 async def _run_with_answered_heartbeats(hass, gateway, sleeps) -> list[dict]:
     gateway.heartbeat_reply = "echo"
     with LoopErrors() as errors:
-        entry, _ = await setup_entry(hass, gateway)
+        entry, _ = await setup_entry(hass, gateway, enable_control=True)
         await sleeps.wait_for(6)
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -207,7 +209,7 @@ async def test_silent_register_range_does_not_starve_heartbeat(
     gateway.silent_ranges = [range(0x10B0, 0x10BD)]
     interval = HEARTBEAT_INTERVAL / SCALE
     with patch.object(coordinator_module, "HEARTBEAT_INTERVAL", interval):
-        _, coordinator = await setup_entry(hass, gateway)
+        _, coordinator = await setup_entry(hass, gateway, enable_control=True)
         for block in coordinator._blocks:
             block.skip_polls = 0  # make this poll hit the silent range again
         gateway.clear()
@@ -241,7 +243,7 @@ async def test_polls_work_between_answered_heartbeats(
 ) -> None:
     gateway.heartbeat_reply = "echo"
     with LoopErrors() as errors:
-        _, coordinator = await setup_entry(hass, gateway)
+        _, coordinator = await setup_entry(hass, gateway, enable_control=True)
         for _ in range(4):
             await sleeps.wait_for(len(sleeps.delays) + 2)
             await coordinator.async_refresh()

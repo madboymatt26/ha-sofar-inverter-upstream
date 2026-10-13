@@ -63,27 +63,44 @@ async def _run_a_while(hass: HomeAssistant, coordinator, polls: int = 4) -> None
 
 
 @pytest.mark.parametrize("working_mode", [0, 3])
-async def test_defaults_send_no_writes(hass: HomeAssistant, gateway: FakeSofarGateway, working_mode) -> None:
-    """Defaults: control off, schedule off, clock monitor on."""
+async def test_control_off_sends_only_standard_reads(
+    hass: HomeAssistant, gateway: FakeSofarGateway, working_mode
+) -> None:
+    """Defaults (control off): nothing but FC 0x03 / 0x04 reaches the inverter."""
     gateway.working_mode = working_mode
     _, coordinator = await setup_entry(hass, gateway)
     await _run_a_while(hass, coordinator)
+    assert gateway.frames
+    assert {f.fc for f in gateway.frames} <= {0x03, 0x04}
     assert gateway.writes == []
-    assert gateway.frames_for(FC_PASSIVE) == []
-    assert gateway.frames_for(FC_WRITE_SINGLE) == []
-    assert gateway.frames_for(FC_BROADCAST_TIME) == []
-    # The only non-read frames: heartbeat, event-log read, and the RTC read that
-    # Sofar encodes as FC 0x10 (Write Multiple Registers) with a zero count.
-    assert _signature(gateway.frames) == {(FC_HEARTBEAT, ""), (FC_EVENT_LOG, ""), CLOCK_READ}
 
 
-async def test_most_restrictive_options(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    """Control, schedule and clock monitor all off: the heartbeat and the
-    event-log read still go out. Neither can be switched off by configuration."""
-    _, coordinator = await setup_entry(hass, gateway, enable_clock_monitor=False)
+async def test_control_off_ignores_schedule_and_clock_options(
+    hass: HomeAssistant, gateway: FakeSofarGateway
+) -> None:
+    """Schedule and clock monitoring switched on do not undo read-only mode."""
+    _, coordinator = await setup_entry(
+        hass, gateway, enable_schedule=True, enable_clock_monitor=True
+    )
+    await _run_a_while(hass, coordinator)
+    assert {f.fc for f in gateway.frames} <= {0x03, 0x04}
+    assert coordinator.supports_schedule is False and coordinator.supports_clock is False
+    assert hass.states.get("select.sofar_inverter_working_mode") is None
+    assert hass.states.get("number.sofar_inverter_timing_charge_power") is None
+
+
+async def test_control_on_non_read_frames(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
+    """With control on: heartbeat, event-log read, Sofar's RTC read (FC 0x10 at
+    0x8000, count 0) and the one start-up fail-safe Auto. Nothing is written."""
+    _, coordinator = await setup_entry(hass, gateway, enable_control=True)
     await _run_a_while(hass, coordinator)
     assert gateway.writes == []
-    assert _signature(gateway.frames) == {(FC_HEARTBEAT, ""), (FC_EVENT_LOG, "")}
+    assert _signature(gateway.frames) == {
+        (FC_HEARTBEAT, ""),
+        (FC_EVENT_LOG, ""),
+        CLOCK_READ,
+        (FC_PASSIVE, "01035555"),
+    }
 
 
 async def test_control_enabled_sends_only_the_failsafe(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
@@ -117,7 +134,7 @@ async def test_schedule_support_reads_but_never_writes(hass: HomeAssistant, gate
 
 
 async def test_schedule_write_only_when_asked(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    _, coordinator = await setup_entry(hass, gateway, enable_schedule=True)
+    _, coordinator = await setup_entry(hass, gateway, enable_schedule=True, enable_control=True)
     await hass.services.async_call(
         "number", "set_value",
         {"entity_id": "number.sofar_inverter_timing_charge_power", "value": 1500}, blocking=True,
@@ -127,7 +144,7 @@ async def test_schedule_write_only_when_asked(hass: HomeAssistant, gateway: Fake
 
 
 async def test_clock_is_only_set_by_the_button(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    _, coordinator = await setup_entry(hass, gateway)
+    _, coordinator = await setup_entry(hass, gateway, enable_control=True)
     await _run_a_while(hass, coordinator)
     assert gateway.frames_for(FC_BROADCAST_TIME) == []
     await hass.services.async_call(

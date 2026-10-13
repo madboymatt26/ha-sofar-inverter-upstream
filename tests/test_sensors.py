@@ -71,8 +71,11 @@ async def test_units_and_classes(hass: HomeAssistant, gateway: FakeSofarGateway)
 
 
 async def test_diagnostic_and_device_values(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    """Values that are disabled-by-default entities are checked on the coordinator."""
-    _, coordinator = await setup_entry(hass, gateway)
+    """Values that are disabled-by-default entities are checked on the coordinator.
+
+    Control is on so the FC 0x50 event-log read is made; with control off the
+    integration sends standard reads only and last_event does not exist."""
+    _, coordinator = await setup_entry(hass, gateway, enable_control=True)
     data = coordinator.data
     assert data["grid_code"] == "UK-G59"
     assert data["battery_type_text"] == "PYLON"
@@ -127,3 +130,15 @@ async def test_no_fault_text_is_the_string_none(hass: HomeAssistant, gateway: Fa
     await setup_entry(hass, gateway)
     assert hass.states.get(PREFIX + "active_faults").state == "None"
     assert hass.states.get("binary_sensor.sofar_inverter_problem").state == "off"
+
+
+async def test_read_only_mode_has_no_event_or_clock_entities(
+    hass: HomeAssistant, gateway: FakeSofarGateway
+) -> None:
+    _, coordinator = await setup_entry(hass, gateway, enable_clock_monitor=True)
+    assert "last_event" not in coordinator.derived_keys
+    assert "inverter_clock" not in coordinator.derived_keys
+    assert hass.states.get(PREFIX + "last_event") is None
+    assert hass.states.get("button.sofar_inverter_sync_inverter_clock") is None
+    # Device info still comes from a plain FC 0x03 read.
+    assert coordinator.data["rated_power"] == 3000

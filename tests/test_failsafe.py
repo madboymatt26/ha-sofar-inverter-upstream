@@ -7,7 +7,7 @@ import asyncio
 from homeassistant.core import HomeAssistant
 
 from .conftest import setup_entry
-from .fake_sofar import FC_HEARTBEAT, WATCHDOG_SECONDS, FakeSofarGateway
+from .fake_sofar import WATCHDOG_SECONDS, FakeSofarGateway
 
 AUTO = (0x0103, 0x5555)
 MODE = "select.sofar_inverter_battery_mode"
@@ -95,16 +95,17 @@ async def test_quick_restart_still_ends_a_forced_charge(hass: HomeAssistant, gat
     assert gateway.passive_state == "auto"
 
 
-async def test_restart_with_control_disabled_leaves_setpoint(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    """With control off nothing is released: a setpoint left by another
-    controller (e.g. the MQTT bridge) stays until the watchdog drops it."""
+async def test_control_disabled_never_touches_a_setpoint(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
+    """With control off nothing is released or kept alive: a setpoint left by
+    another controller (e.g. Sofar2mqtt) is neither cleared by a fail-safe
+    Auto nor held up by our heartbeat; it lasts as long as that controller's
+    own heartbeat does."""
     gateway.passive_state, gateway.passive_watts = "charge", 2000
-    gateway.last_heartbeat = gateway.now()
+    gateway.last_heartbeat = gateway.setpoint_at = gateway.now()
     _, coordinator = await setup_entry(hass, gateway, enable_control=False)
-    await coordinator.async_refresh()
-    assert gateway.passive_commands() == []
+    for _ in range(3):
+        await coordinator.async_refresh()
+    assert {f.fc for f in gateway.frames} <= {0x03, 0x04}
     assert gateway.passive_state == "charge"
-    # ...but the integration's own heartbeat keeps that setpoint alive.
     gateway.advance(WATCHDOG_SECONDS + 5)
-    assert gateway.passive_state == "standby"  # in this test no beat was due yet
-    assert FC_HEARTBEAT  # documented in test_heartbeat: beats run with control off
+    assert gateway.passive_state == "standby"  # nothing from us kept it alive

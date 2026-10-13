@@ -860,7 +860,14 @@ class SofarCoordinator(DataUpdateCoordinator):
         self.model = model
         self.max_power = max_power
         self.enable_control = enable_control
-        self._send_heartbeat = model in (MODEL_ME3000, MODEL_HYD_ES)
+        # With control disabled the integration sends nothing but standard
+        # FC 0x03 / 0x04 reads: no heartbeat, passive commands, schedule or clock
+        # writes, and none of Sofar's proprietary requests (event log 0x50,
+        # extended read 0x21, RTC read via 0x10). That makes "control off" a
+        # genuinely read-only mode, safe to point at a live inverter that
+        # something else is controlling.
+        self.reads_only = not enable_control
+        self._send_heartbeat = model in (MODEL_ME3000, MODEL_HYD_ES) and enable_control
 
         # Share one client + lock + heartbeat per gateway (host:port).
         self._gateway = _get_gateway(hass, host, port)
@@ -874,8 +881,13 @@ class SofarCoordinator(DataUpdateCoordinator):
         self.runstate_map = model_cfg["runstate"]
         self.supports_faults: bool = model_cfg["faults"]
         self.working_mode_register: int = model_cfg["working_mode_register"]
-        self.supports_schedule: bool = bool(model_cfg["schedule"]) and enable_schedule
-        self.supports_clock: bool = bool(model_cfg["clock"]) and enable_clock_monitor
+        self.supports_schedule: bool = (
+            bool(model_cfg["schedule"]) and enable_schedule and enable_control
+        )
+        self.supports_clock: bool = (
+            bool(model_cfg["clock"]) and enable_clock_monitor and enable_control
+        )
+        self.supports_event_log: bool = self.supports_faults and enable_control
         self.supports_working_mode_write: bool = bool(model_cfg["schedule"])
 
         self._battery2_checked = False
@@ -949,7 +961,8 @@ class SofarCoordinator(DataUpdateCoordinator):
         if self.supports_faults:
             keys += [d.key for d in DERIVED_FAULTS]
             keys += [d.key for d in DERIVED_EXTRA]
-            keys += [d.key for d in DERIVED_EVENT]
+            if self.supports_event_log:
+                keys += [d.key for d in DERIVED_EVENT]
         if self.supports_clock:
             keys += [d.key for d in DERIVED_CLOCK]
         return keys
@@ -1331,7 +1344,7 @@ class SofarCoordinator(DataUpdateCoordinator):
             if registers is not None or self._no_response:
                 break
 
-        if registers is None and not self._no_response:
+        if registers is None and not self._no_response and not self.reads_only:
             # Fall back to the extended function code the protocol table assigns
             # to this range.
             try:
@@ -1635,7 +1648,7 @@ class SofarCoordinator(DataUpdateCoordinator):
         Home Assistant downtime and is a better basis for "last fault" than
         edge-detecting live bitfields.
         """
-        if not self.supports_faults:
+        if not self.supports_event_log:
             return
         now = self.hass.loop.time()
         if now < self._event_next_read:
