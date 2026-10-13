@@ -111,11 +111,6 @@ async def test_connection_test_closes_its_client_on_error(
     assert closed
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _test_connection never checks isError(); pymodbus 3.13's "
-    "ExceptionResponse has registers == [], so an exception reply is accepted",
-)
 async def test_wrong_unit_id_with_gateway_exception_is_invalid_slave(
     hass: HomeAssistant, gateway: FakeSofarGateway, no_setup
 ) -> None:
@@ -125,13 +120,14 @@ async def test_wrong_unit_id_with_gateway_exception_is_invalid_slave(
     assert result["errors"] == {"base": "invalid_slave"}
 
 
-async def test_exception_reply_currently_creates_an_entry(
+async def test_exception_reply_is_not_a_successful_connection(
     hass: HomeAssistant, gateway: FakeSofarGateway, no_setup
 ) -> None:
-    """Pins today's behaviour behind the xfail above."""
     gateway.exception_code = 0x02
     result = await _submit(hass, _user_input(gateway.port))
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_slave"}
+    assert hass.config_entries.async_entries("sofar_inverter") == []
 
 
 async def test_duplicate_is_aborted(hass: HomeAssistant, gateway: FakeSofarGateway, no_setup) -> None:

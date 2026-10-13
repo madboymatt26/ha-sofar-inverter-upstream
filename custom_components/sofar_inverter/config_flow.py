@@ -136,7 +136,13 @@ async def _test_connection(host: str, port: int, slave: int, model: str) -> str 
         )
         client.close()
 
-        if not hasattr(result, "registers") or result.registers is None:
+        # An exception reply (e.g. 0x0B from the gateway when nothing answers
+        # this unit ID) has registers == [], not None, so check isError() too.
+        if (
+            result is None
+            or (hasattr(result, "isError") and result.isError())
+            or not getattr(result, "registers", None)
+        ):
             return "invalid_slave"
         return None
     except ConnectionRefusedError:
