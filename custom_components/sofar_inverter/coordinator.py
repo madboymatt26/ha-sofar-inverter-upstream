@@ -118,6 +118,10 @@ HEARTBEAT_INTERVAL = 9  # seconds, fixed (not user-configurable)
 HEARTBEAT_RETRY_DELAY = 2  # seconds, after a failed send
 HEARTBEAT_MAX_FAST_RETRIES = 3
 
+# A block that fell back to per-register reads is tried as a block again after
+# this many polls (about 5 minutes at the default 10 s interval).
+BLOCK_RETRY_POLLS = 30
+
 # Standard Modbus exception codes, for readable logging of a 0x8x response.
 MODBUS_EXCEPTIONS = {
     1: "Illegal function",
@@ -485,6 +489,7 @@ class ReadBlock:
     func: int | None = None
     failures: int = 0
     individual: bool = False
+    polls_since_fallback: int = 0
 
     @property
     def count(self) -> int:
@@ -1106,8 +1111,13 @@ class SofarCoordinator(DataUpdateCoordinator):
 
         for block in self._blocks:
             if block.individual:
-                await self._read_block_individually(client, block, results)
-                continue
+                block.polls_since_fallback += 1
+                if block.polls_since_fallback < BLOCK_RETRY_POLLS:
+                    await self._read_block_individually(client, block, results)
+                    continue
+                # Periodically try the whole block again, so one bad spell
+                # does not cost a transaction per register for good.
+                block.polls_since_fallback = 0
 
             registers = None
             for func in block.func_order():
@@ -1119,20 +1129,31 @@ class SofarCoordinator(DataUpdateCoordinator):
                     break
 
             if registers is None:
-                block.failures += 1
-                if block.failures >= 3 and not block.individual:
-                    block.individual = True
-                    _LOGGER.info(
-                        "Register block 0x%04X+%s keeps failing on %s; falling back "
-                        "to individual reads for its %s register(s)",
-                        block.start, block.count, self.host, len(block.sensors),
-                    )
-                else:
+                if not block.individual:
                     # Do not lose a whole block to one transient failure.
                     block.func = None
-                await self._read_block_individually(client, block, results)
+                read = await self._read_block_individually(client, block, results)
+                # Only a block the inverter refuses while its registers still
+                # read one by one counts against it. If nothing reads at all the
+                # bus or gateway is down, which says nothing about the block.
+                if read and not block.individual:
+                    block.failures += 1
+                    if block.failures >= 3:
+                        block.individual = True
+                        block.polls_since_fallback = 0
+                        _LOGGER.info(
+                            "Register block 0x%04X+%s keeps failing on %s; falling "
+                            "back to individual reads for its %s register(s)",
+                            block.start, block.count, self.host, len(block.sensors),
+                        )
                 continue
 
+            if block.individual:
+                _LOGGER.info(
+                    "Register block 0x%04X+%s on %s reads as a block again",
+                    block.start, block.count, self.host,
+                )
+                block.individual = False
             block.failures = 0
             for sensor in block.sensors:
                 offset = sensor.register - block.start
@@ -1148,8 +1169,12 @@ class SofarCoordinator(DataUpdateCoordinator):
 
         return results
 
-    async def _read_block_individually(self, client, block, results: dict) -> None:
-        """Per-register fallback so one bad address cannot blank a whole block."""
+    async def _read_block_individually(self, client, block, results: dict) -> int:
+        """Per-register fallback so one bad address cannot blank a whole block.
+
+        Returns how many of the block's registers were read.
+        """
+        read = 0
         for sensor in block.sensors:
             if sensor.key in results:
                 continue
@@ -1162,7 +1187,9 @@ class SofarCoordinator(DataUpdateCoordinator):
                     break
             if registers is None:
                 continue
+            read += 1
             self._store_value(results, sensor, registers)
+        return read
 
     def _store_value(self, results: dict, sensor, registers: list[int]) -> None:
         """Scale and store one decoded register value."""

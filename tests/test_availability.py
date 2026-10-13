@@ -115,42 +115,46 @@ async def test_recovery_after_silence(hass: HomeAssistant, gateway: FakeSofarGat
     assert hass.states.get(SOC).state == "60.0"
 
 
-async def test_reads_after_recovery_are_one_register_each(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
-    """Pins today's behaviour behind the xfail below."""
-    _, coordinator = await setup_entry(hass, gateway)
-    gateway.clear()
-    await coordinator.async_refresh()
-    healthy = len(_poll_requests(gateway))
-    gateway.silent = True
-    for _ in range(3):
-        await coordinator.async_refresh()
-    gateway.silent = False
-    gateway.clear()
-    await coordinator.async_refresh()
-    await coordinator.async_refresh()
-    after = len(_poll_requests(gateway)) // 2
-    assert healthy == 4  # 0x0200+62, 0x0242+7, 0x10B0+13, 0x1200+1
-    assert after >= 60  # one transaction per register, for good
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: after three failed polls each ReadBlock sets individual=True and "
-    "nothing ever resets it, so block reads never come back without a reload",
-)
 async def test_block_reads_resume_after_recovery(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
+    """An outage is not the block's fault: block reads come straight back."""
     _, coordinator = await setup_entry(hass, gateway)
     gateway.clear()
     await coordinator.async_refresh()
     healthy = len(_poll_requests(gateway))
+    assert healthy == 4  # 0x0200+62, 0x0242+7, 0x10B0+13, 0x1200+1
     gateway.silent = True
-    for _ in range(3):
+    for _ in range(4):
         await coordinator.async_refresh()
     gateway.silent = False
     await coordinator.async_refresh()
     gateway.clear()
     await coordinator.async_refresh()
-    assert len(_poll_requests(gateway)) <= healthy + 1
+    assert len(_poll_requests(gateway)) == healthy
+    assert not any(block.individual for block in coordinator._blocks)
+
+
+async def test_refused_block_falls_back_then_is_retried(
+    hass: HomeAssistant, gateway: FakeSofarGateway
+) -> None:
+    """A span the unit refuses while single registers still read falls back to
+    per-register reads after three polls, and is tried as a block again later."""
+    from custom_components.sofar_inverter.coordinator import BLOCK_RETRY_POLLS
+
+    gateway.reject_span_ranges = [range(0x10B0, 0x10BD)]
+    _, coordinator = await setup_entry(hass, gateway)
+    for _ in range(3):
+        await coordinator.async_refresh()
+    block = next(b for b in coordinator._blocks if b.start == 0x10B0)
+    assert block.individual is True
+    assert coordinator.data["battery_capacity"] == 300  # still read, one by one
+
+    gateway.reject_span_ranges = []
+    for _ in range(BLOCK_RETRY_POLLS):
+        await coordinator.async_refresh()
+    assert block.individual is False
+    gateway.clear()
+    await coordinator.async_refresh()
+    assert len(_poll_requests(gateway)) == 4
 
 
 async def test_commands_wait_for_a_slow_poll(hass: HomeAssistant, gateway: FakeSofarGateway) -> None:
